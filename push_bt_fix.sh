@@ -76,12 +76,12 @@ locate() { # locate <file name> -> prints path
 fetch() { # fetch <file name> <md5>
     local name="$1" want="$2" path found
     if found="$(locate "$name")"; then
-        say "using local file: $found"
+        say "using local file: $found" >&2
         path="$found"
     else
         command -v curl >/dev/null 2>&1 ||
             die "curl not found - install curl or keep the fix files next to this script"
-        say "downloading $name"
+        say "downloading $name" >&2
         curl -fsSL --retry 3 "$REPO_RAW/$name" -o "$WORK/$name" ||
             die "download failed: $REPO_RAW/$name"
         path="$WORK/$name"
@@ -95,6 +95,8 @@ fetch() { # fetch <file name> <md5>
 
 XML_PATH="$(fetch "$XML_NAME" "$XML_MD5")"
 SO_PATH="$(fetch "$SO_NAME" "$SO_MD5")"
+[ -s "$XML_PATH" ] || die "could not prepare $XML_NAME"
+[ -s "$SO_PATH" ] || die "could not prepare $SO_NAME"
 
 # ------------------------------------------------------------------------------
 # 2. Prepare adb access
