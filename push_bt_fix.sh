@@ -1,228 +1,367 @@
+
 #!/usr/bin/env bash
 # ==============================================================================
-# Warm (Redmi 24116RNC1I) - Bluetooth A2DP offload fix
+# Warm (Redmi A4 5G - 24116RNC1I)
+# Bluetooth A2DP Offload Fix - LineageOS 24 / Android 17
 #
-# Installs the Qualcomm Bluetooth A2DP HAL and audio policy on LineageOS 24
-# (Android 17) builds that ship a vendor image with A2DP offload disabled.
-# Files are written through Android's overlayfs (adb remount), so the fix
-# survives a normal reboot. A full clean flash removes it again.
-#
-# Requirements: adb (platform-tools), USB debugging enabled, rooted device
-# (userdebug / eng build or a working KernelSU-Magisk `adb root`).
+# Repository:
+# https://github.com/Shyam-vadgama/warm-bt-a2dp-fix
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Shyam-vadgama/warm-bt-a2dp-fix/main/push_bt_fix.sh | bash
-#   bash push_bt_fix.sh            # local copy, fix files next to the script
-#   bash push_bt_fix.sh --reboot   # install and reboot automatically
+# curl -fsSL https://raw.githubusercontent.com/Shyam-vadgama/warm-bt-a2dp-fix/main/push_bt_fix.sh | bash
 #
-# The script downloads the two fix files from this repository when they are
-# not present in the current directory, so the curl one-liner works on a fresh
-# ROM where nothing has been copied to the phone or PC yet.
+# Reboot automatically:
+# curl -fsSL https://raw.githubusercontent.com/Shyam-vadgama/warm-bt-a2dp-fix/main/push_bt_fix.sh | bash -s -- --reboot
 # ==============================================================================
-set -euo pipefail
+
+set -Eeuo pipefail
 
 REPO_RAW="${WARM_BT_FIX_RAW:-https://raw.githubusercontent.com/Shyam-vadgama/warm-bt-a2dp-fix/main}"
 
 XML_NAME="bluetooth_qti_audio_policy_configuration.xml"
 SO_NAME="audio.bluetooth_qti.default.so"
+
 XML_MD5="322e6992c6e04dd4de2775a05fa59266"
 SO_MD5="568ad926348846885a30a1b3cc30c967"
 
+CAP="sbc-aptx-aptxtws-aptxhd-aac-ldac"
+
 REBOOT=0
+
 for arg in "$@"; do
     case "$arg" in
         --reboot) REBOOT=1 ;;
         -h|--help)
-            cat <<'USAGE'
-Usage: push_bt_fix.sh [--reboot]
-
-  (no option)  install the fix and print the reboot instructions
-  --reboot     install the fix and reboot the phone immediately
-  -h, --help   show this help
-
-The script needs adb, a connected phone with USB debugging enabled and root
-access (adb root). It downloads the fix files from this repository when they
-are not available locally.
-USAGE
+            echo "Usage: push_bt_fix.sh [--reboot]"
             exit 0
             ;;
-        *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
+        *)
+            echo "Unknown option: $arg" >&2
+            exit 2
+            ;;
     esac
 done
 
-say() { printf '[warm-bt-fix] %s\n' "$*"; }
-die() { printf '[warm-bt-fix] ERROR: %s\n' "$*" >&2; exit 1; }
+say() {
+    printf '[warm-bt-fix] %s\n' "$*"
+}
+
+die() {
+    printf '[warm-bt-fix] ERROR: %s\n' "$*" >&2
+    exit 1
+}
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/warm-bt-fix.XXXXXX")"
-cleanup() { rm -rf "$WORK"; }
+
+cleanup() {
+    rm -rf "$WORK"
+}
+
 trap cleanup EXIT
 
-# ------------------------------------------------------------------------------
-# 1. Locate the two payload files (local copy first, repository fallback)
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# 1. Locate / download files
+# ==============================================================================
+
 SELF_DIR=""
+
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
-locate() { # locate <file name> -> prints path
-    local name="$1" dir
+locate() {
+    local name="$1"
+    local dir
+
     for dir in "$SELF_DIR" "$PWD" "$PWD/files"; do
-        [ -n "$dir" ] && [ -s "$dir/$name" ] && { printf '%s\n' "$dir/$name"; return 0; }
+        if [ -n "$dir" ] && [ -s "$dir/$name" ]; then
+            printf '%s\n' "$dir/$name"
+            return 0
+        fi
     done
+
     return 1
 }
 
-fetch() { # fetch <file name> <md5>
-    local name="$1" want="$2" path found
+fetch() {
+    local name="$1"
+    local expected="$2"
+    local path found got
+
     if found="$(locate "$name")"; then
-        say "using local file: $found" >&2
+        say "Using local file: $found"
         path="$found"
     else
         command -v curl >/dev/null 2>&1 ||
-            die "curl not found - install curl or keep the fix files next to this script"
-        say "downloading $name" >&2
-        curl -fsSL --retry 3 "$REPO_RAW/$name" -o "$WORK/$name" ||
-            die "download failed: $REPO_RAW/$name"
+            die "curl is not installed"
+
+        say "Downloading $name"
+
+        curl -fsSL --retry 3 \
+            "$REPO_RAW/$name" \
+            -o "$WORK/$name" ||
+            die "Download failed: $name"
+
         path="$WORK/$name"
     fi
+
     if command -v md5sum >/dev/null 2>&1; then
         got="$(md5sum "$path" | awk '{print $1}')"
-        [ "$got" = "$want" ] || die "checksum mismatch for $name ($got)"
+
+        [ "$got" = "$expected" ] ||
+            die "Checksum mismatch for $name"
+    else
+        die "md5sum is required for file verification"
     fi
+
     printf '%s\n' "$path"
 }
 
 XML_PATH="$(fetch "$XML_NAME" "$XML_MD5")"
 SO_PATH="$(fetch "$SO_NAME" "$SO_MD5")"
-[ -s "$XML_PATH" ] || die "could not prepare $XML_NAME"
-[ -s "$SO_PATH" ] || die "could not prepare $SO_NAME"
 
-# ------------------------------------------------------------------------------
-# 2. Prepare adb access
-# ------------------------------------------------------------------------------
+[ -s "$XML_PATH" ] || die "XML file missing"
+[ -s "$SO_PATH" ] || die "SO file missing"
+
+# ==============================================================================
+# 2. Check ADB
+# ==============================================================================
+
 command -v adb >/dev/null 2>&1 ||
-    die "adb not found - install Android platform-tools and add them to PATH"
+    die "ADB not found. Install Android platform-tools."
 
 adb start-server >/dev/null 2>&1 || true
-adb get-state >/dev/null 2>&1 ||
-    die "no device found - connect the phone, enable USB debugging and authorize this PC"
 
-say "requesting root"
-adb root >/dev/null 2>&1 || say "adb root unavailable, continuing as-is"
+adb get-state >/dev/null 2>&1 ||
+    die "No authorized device found. Enable USB debugging."
+
+say "Device connected"
+
+say "Requesting root"
+
+ROOT_OUTPUT="$(adb root 2>&1 || true)"
+echo "$ROOT_OUTPUT"
+
 adb wait-for-device
 
-say "remounting /vendor read-write (overlayfs)"
-adb remount 2>/dev/null || true
+ROOT_UID="$(adb shell id -u | tr -d '\r')"
 
-# ------------------------------------------------------------------------------
-# 3. Upload the payload and the on-device installer
-# ------------------------------------------------------------------------------
+[ "$ROOT_UID" = "0" ] ||
+    die "ADB root is required. Run on userdebug/eng or a supported rooted setup."
+
+# ==============================================================================
+# 3. Remount vendor
+# ==============================================================================
+
+say "Remounting vendor read-write"
+
+adb remount ||
+    die "adb remount failed. Check overlayfs/root support."
+
+# ==============================================================================
+# 4. Upload payload
+# ==============================================================================
+
+say "Uploading Bluetooth files"
+
 adb push "$XML_PATH" /data/local/tmp/bq.xml >/dev/null
 adb push "$SO_PATH" /data/local/tmp/bq.so >/dev/null
 
-cat >"$WORK/device_install.sh" <<'DEVICE_SCRIPT_EOF'
+# ==============================================================================
+# 5. Create on-device installer
+# ==============================================================================
+
+cat > "$WORK/device_install.sh" <<'DEVICE_SCRIPT_EOF'
 #!/system/bin/sh
-# Warm (Redmi 24116RNC1I) - on-device installer for the Bluetooth A2DP offload fix.
-# Runs as root on the phone. Launched by push_bt_fix.sh (Linux/macOS) or WarmBTFix.exe (Windows).
-set -e
+
+set -eu
 
 TMP=/data/local/tmp
+
 XML_DST=/vendor/etc/bluetooth_qti_audio_policy_configuration.xml
 SO_DST=/vendor/lib64/hw/audio.bluetooth_qti.default.so
+
 SKU=/vendor/etc/audio/sku_pitti/audio_policy_configuration.xml
 BP=/vendor/build.prop
-CAP=sbc-aptx-aptxtws-aptxhd-aac-ldac
 
-log() { echo "[warm-bt-fix] $*"; }
-die() { echo "[warm-bt-fix] ERROR: $*" >&2; exit 1; }
+CAP="sbc-aptx-aptxtws-aptxhd-aac-ldac"
 
-# ---- preconditions -----------------------------------------------------------
-[ "$(id -u)" = "0" ] || die "root is required (run 'adb root' first)"
-[ -s "$TMP/bq.xml" ] || die "missing $TMP/bq.xml"
-[ -s "$TMP/bq.so" ] || die "missing $TMP/bq.so"
-[ -f "$SKU" ] || die "unsupported device: $SKU not found"
-[ -f "$BP" ] || die "unsupported device: $BP not found"
+log() {
+    echo "[warm-bt-fix] $*"
+}
+
+die() {
+    echo "[warm-bt-fix] ERROR: $*" >&2
+    exit 1
+}
+
+# ------------------------------------------------------------------------------
+# Preconditions
+# ------------------------------------------------------------------------------
+
+[ "$(id -u)" = "0" ] || die "Root required"
+
+[ -s "$TMP/bq.xml" ] || die "Missing XML payload"
+[ -s "$TMP/bq.so" ] || die "Missing SO payload"
+
+[ -f "$SKU" ] || die "SKU audio policy not found"
+[ -f "$BP" ] || die "Vendor build.prop not found"
+
+# Test vendor write access
 
 touch /vendor/.warm_rw_test 2>/dev/null ||
-    die "/vendor is read-only - enable root, run 'adb remount' and try again"
+    die "/vendor is read-only. Run adb remount."
+
 rm -f /vendor/.warm_rw_test
 
-# ---- 1. Bluetooth A2DP HAL + audio policy ------------------------------------
-log "installing Bluetooth A2DP HAL and audio policy"
+# ------------------------------------------------------------------------------
+# 1. Install Bluetooth HAL and policy
+# ------------------------------------------------------------------------------
+
+log "Installing Bluetooth A2DP HAL and audio policy"
+
+mkdir -p /vendor/lib64/hw
+
 cp -f "$TMP/bq.xml" "$XML_DST"
 cp -f "$TMP/bq.so" "$SO_DST"
+
 chown 0:0 "$XML_DST" "$SO_DST"
+
 chmod 0644 "$XML_DST" "$SO_DST"
+
 chcon u:object_r:vendor_configs_file:s0 "$XML_DST"
 chcon u:object_r:vendor_file:s0 "$SO_DST"
 
-# ---- 2. point the SKU audio policy at the QTI Bluetooth policy ----------------
-log "repointing SKU audio policy to the QTI Bluetooth policy"
-[ -f "$TMP/audio_policy_configuration.xml.stock" ] ||
+# ------------------------------------------------------------------------------
+# 2. Patch SKU audio policy
+# ------------------------------------------------------------------------------
+
+log "Patching SKU audio policy"
+
+if [ ! -f "$TMP/audio_policy_configuration.xml.stock" ]; then
     cp -f "$SKU" "$TMP/audio_policy_configuration.xml.stock"
-sed -i 's#bluetooth_hearing_aid_audio_policy_configuration\.xml#bluetooth_qti_audio_policy_configuration.xml#' "$SKU"
+fi
+
+sed -i \
+'s#bluetooth_hearing_aid_audio_policy_configuration\.xml#bluetooth_qti_audio_policy_configuration.xml#g' \
+"$SKU"
+
 grep -q 'bluetooth_qti_audio_policy_configuration.xml' "$SKU" ||
-    die "could not patch the SKU audio policy"
+    die "Failed to patch SKU audio policy"
+
 chown 0:0 "$SKU"
 chmod 0644 "$SKU"
+
 chcon u:object_r:vendor_configs_file:s0 "$SKU"
 
-# ---- 3. enable A2DP offload in /vendor/build.prop -----------------------------
-log "enabling A2DP offload properties in /vendor/build.prop"
-[ -f "$TMP/build.prop.stock" ] || cp -f "$BP" "$TMP/build.prop.stock"
-sed -i 's#^ro.bluetooth.a2dp_offload.supported=.*#ro.bluetooth.a2dp_offload.supported=true#' "$BP"
-sed -i 's#^persist.bluetooth.a2dp_offload.disabled=.*#persist.bluetooth.a2dp_offload.disabled=false#' "$BP"
-sed -i 's#^#[[:space:]]*persist\.vendor\.qcom\.bluetooth\.a2dp_offload_cap=#persist.vendor.qcom.bluetooth.a2dp_offload_cap=#' "$BP"
-grep -q '^ro.bluetooth.a2dp_offload.supported=' "$BP" ||
-    echo "ro.bluetooth.a2dp_offload.supported=true" >>"$BP"
-grep -q '^persist.bluetooth.a2dp_offload.disabled=' "$BP" ||
-    echo "persist.bluetooth.a2dp_offload.disabled=false" >>"$BP"
-grep -q '^persist.vendor.qcom.bluetooth.a2dp_offload_cap=' "$BP" ||
-    echo "persist.vendor.qcom.bluetooth.a2dp_offload_cap=$CAP" >>"$BP"
+# ------------------------------------------------------------------------------
+# 3. Enable A2DP offload properties
+# ------------------------------------------------------------------------------
+
+log "Configuring A2DP offload properties"
+
+if [ ! -f "$TMP/build.prop.stock" ]; then
+    cp -f "$BP" "$TMP/build.prop.stock"
+fi
+
+set_prop() {
+    key="$1"
+    value="$2"
+
+    if grep -q "^[[:space:]#]*${key}=" "$BP"; then
+        sed -i "s#^[[:space:]#]*${key}=.*#${key}=${value}#" "$BP"
+    else
+        echo "${key}=${value}" >> "$BP"
+    fi
+}
+
+set_prop "ro.bluetooth.a2dp_offload.supported" "true"
+
+set_prop "persist.bluetooth.a2dp_offload.disabled" "false"
+
+set_prop "persist.vendor.qcom.bluetooth.a2dp_offload_cap" "$CAP"
+
 chown 0:0 "$BP"
 chmod 0644 "$BP"
+
 chcon u:object_r:vendor_file:s0 "$BP" 2>/dev/null || true
 
-# ---- 4. report ---------------------------------------------------------------
-log "installed state:"
+# ------------------------------------------------------------------------------
+# 4. Verify installation
+# ------------------------------------------------------------------------------
+
+log "Verifying installed files"
+
+[ -s "$XML_DST" ] || die "XML installation failed"
+[ -s "$SO_DST" ] || die "SO installation failed"
+
 md5sum "$XML_DST" "$SO_DST"
+
+log "Verifying SKU policy"
+
 grep -n 'bluetooth.*audio_policy_configuration' "$SKU"
+
+log "Verifying A2DP properties"
+
 grep -n 'a2dp_offload' "$BP"
+
+log "Bluetooth A2DP fix installed successfully"
+
 DEVICE_SCRIPT_EOF
 
-adb push "$WORK/device_install.sh" /data/local/tmp/warm_bt_fix.sh >/dev/null
+# ==============================================================================
+# 6. Push and execute installer
+# ==============================================================================
 
-# ------------------------------------------------------------------------------
-# 4. Run the on-device installer
-# ------------------------------------------------------------------------------
-adb shell sh /data/local/tmp/warm_bt_fix.sh
+say "Uploading device installer"
 
-say "restarting audioserver"
+adb push "$WORK/device_install.sh" \
+    /data/local/tmp/warm_bt_fix.sh >/dev/null
+
+say "Installing Bluetooth A2DP fix"
+
+adb shell sh /data/local/tmp/warm_bt_fix.sh ||
+    die "Device installation failed"
+
+# ==============================================================================
+# 7. Restart audio services
+# ==============================================================================
+
+say "Restarting audioserver"
+
 adb shell 'killall audioserver >/dev/null 2>&1 || true'
+
 sleep 4
 
-# ------------------------------------------------------------------------------
-# 5. Finish
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# 8. Finish
+# ==============================================================================
+
 if [ "$REBOOT" = "1" ]; then
-    say "rebooting the device"
+    say "Rebooting device"
     adb reboot
     exit 0
 fi
 
 cat <<'EOF'
 
---------------------------------------------------------------------------
-Installation complete. A reboot is required for the new properties to load:
+============================================================
+       WARM BLUETOOTH A2DP FIX INSTALLED
+============================================================
+
+Installation completed successfully.
+
+A reboot is required for the new properties to load.
+
+Run:
 
     adb reboot
 
-After the reboot, connect the Bluetooth headset and play music.
-Verify with:
+After reboot, connect your Bluetooth headset and play music.
 
-    adb shell dumpsys bluetooth_manager | grep mA2dpOffloadEnabled
+Verify:
 
-Expected output: mA2dpOffloadEnabled: true
---------------------------------------------------------------------------
+    adb shell dumpsys bluetooth_manager | grep -E 'mA2dpOffloadEnabled|mCodecConfig'
+
+============================================================
 EOF
