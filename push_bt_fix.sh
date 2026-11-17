@@ -1,17 +1,9 @@
 
 #!/usr/bin/env bash
 # ==============================================================================
-# Warm (Redmi A4 5G - 24116RNC1I)
-# Bluetooth A2DP Offload Fix - LineageOS 24 / Android 17
-#
-# Repository:
-# https://github.com/Shyam-vadgama/warm-bt-a2dp-fix
-#
-# Usage:
-# curl -fsSL https://raw.githubusercontent.com/Shyam-vadgama/warm-bt-a2dp-fix/main/push_bt_fix.sh | bash
-#
-# Reboot automatically:
-# curl -fsSL https://raw.githubusercontent.com/Shyam-vadgama/warm-bt-a2dp-fix/main/push_bt_fix.sh | bash -s -- --reboot
+# Warm - Redmi A4 5G (24116RNC1I)
+# Bluetooth A2DP Offload Fix
+# LineageOS 24 / Android 17
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -43,24 +35,20 @@ for arg in "$@"; do
 done
 
 say() {
-    printf '[warm-bt-fix] %s\n' "$*"
+    printf '[warm-bt-fix] %s\n' "$*" >&2
 }
 
 die() {
-    printf '[warm-bt-fix] ERROR: %s\n' "$*" >&2
+    say "ERROR: $*"
     exit 1
 }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/warm-bt-fix.XXXXXX")"
 
-cleanup() {
-    rm -rf "$WORK"
-}
-
-trap cleanup EXIT
+trap 'rm -rf "$WORK"' EXIT
 
 # ==============================================================================
-# 1. Locate / download files
+# 1. Locate files
 # ==============================================================================
 
 SELF_DIR=""
@@ -105,15 +93,17 @@ fetch() {
         path="$WORK/$name"
     fi
 
-    if command -v md5sum >/dev/null 2>&1; then
-        got="$(md5sum "$path" | awk '{print $1}')"
+    [ -s "$path" ] || die "Empty file: $name"
 
-        [ "$got" = "$expected" ] ||
-            die "Checksum mismatch for $name"
-    else
-        die "md5sum is required for file verification"
-    fi
+    command -v md5sum >/dev/null 2>&1 ||
+        die "md5sum is required"
 
+    got="$(md5sum "$path" | awk '{print $1}')"
+
+    [ "$got" = "$expected" ] ||
+        die "Checksum mismatch for $name: $got"
+
+    # IMPORTANT: Only file path goes to stdout.
     printf '%s\n' "$path"
 }
 
@@ -123,8 +113,10 @@ SO_PATH="$(fetch "$SO_NAME" "$SO_MD5")"
 [ -s "$XML_PATH" ] || die "XML file missing"
 [ -s "$SO_PATH" ] || die "SO file missing"
 
+say "Payload files verified"
+
 # ==============================================================================
-# 2. Check ADB
+# 2. ADB checks
 # ==============================================================================
 
 command -v adb >/dev/null 2>&1 ||
@@ -133,42 +125,42 @@ command -v adb >/dev/null 2>&1 ||
 adb start-server >/dev/null 2>&1 || true
 
 adb get-state >/dev/null 2>&1 ||
-    die "No authorized device found. Enable USB debugging."
+    die "No authorized device found"
 
 say "Device connected"
 
 say "Requesting root"
 
 ROOT_OUTPUT="$(adb root 2>&1 || true)"
-echo "$ROOT_OUTPUT"
+[ -n "$ROOT_OUTPUT" ] && say "$ROOT_OUTPUT"
 
 adb wait-for-device
 
 ROOT_UID="$(adb shell id -u | tr -d '\r')"
 
 [ "$ROOT_UID" = "0" ] ||
-    die "ADB root is required. Run on userdebug/eng or a supported rooted setup."
+    die "ADB root unavailable. Root/userdebug build required."
 
 # ==============================================================================
-# 3. Remount vendor
+# 3. Remount
 # ==============================================================================
 
-say "Remounting vendor read-write"
+say "Remounting vendor"
 
 adb remount ||
-    die "adb remount failed. Check overlayfs/root support."
+    die "adb remount failed"
 
 # ==============================================================================
-# 4. Upload payload
+# 4. Push payloads
 # ==============================================================================
 
-say "Uploading Bluetooth files"
+say "Uploading Bluetooth payloads"
 
 adb push "$XML_PATH" /data/local/tmp/bq.xml >/dev/null
 adb push "$SO_PATH" /data/local/tmp/bq.so >/dev/null
 
 # ==============================================================================
-# 5. Create on-device installer
+# 5. On-device installer
 # ==============================================================================
 
 cat > "$WORK/device_install.sh" <<'DEVICE_SCRIPT_EOF'
@@ -207,18 +199,16 @@ die() {
 [ -f "$SKU" ] || die "SKU audio policy not found"
 [ -f "$BP" ] || die "Vendor build.prop not found"
 
-# Test vendor write access
-
 touch /vendor/.warm_rw_test 2>/dev/null ||
-    die "/vendor is read-only. Run adb remount."
+    die "Vendor is read-only"
 
 rm -f /vendor/.warm_rw_test
 
 # ------------------------------------------------------------------------------
-# 1. Install Bluetooth HAL and policy
+# 1. Install HAL and XML
 # ------------------------------------------------------------------------------
 
-log "Installing Bluetooth A2DP HAL and audio policy"
+log "Installing Bluetooth A2DP HAL and policy"
 
 mkdir -p /vendor/lib64/hw
 
@@ -226,7 +216,6 @@ cp -f "$TMP/bq.xml" "$XML_DST"
 cp -f "$TMP/bq.so" "$SO_DST"
 
 chown 0:0 "$XML_DST" "$SO_DST"
-
 chmod 0644 "$XML_DST" "$SO_DST"
 
 chcon u:object_r:vendor_configs_file:s0 "$XML_DST"
@@ -247,7 +236,7 @@ sed -i \
 "$SKU"
 
 grep -q 'bluetooth_qti_audio_policy_configuration.xml' "$SKU" ||
-    die "Failed to patch SKU audio policy"
+    die "SKU policy patch failed"
 
 chown 0:0 "$SKU"
 chmod 0644 "$SKU"
@@ -255,7 +244,7 @@ chmod 0644 "$SKU"
 chcon u:object_r:vendor_configs_file:s0 "$SKU"
 
 # ------------------------------------------------------------------------------
-# 3. Enable A2DP offload properties
+# 3. Enable A2DP properties
 # ------------------------------------------------------------------------------
 
 log "Configuring A2DP offload properties"
@@ -276,9 +265,7 @@ set_prop() {
 }
 
 set_prop "ro.bluetooth.a2dp_offload.supported" "true"
-
 set_prop "persist.bluetooth.a2dp_offload.disabled" "false"
-
 set_prop "persist.vendor.qcom.bluetooth.a2dp_offload_cap" "$CAP"
 
 chown 0:0 "$BP"
@@ -287,7 +274,7 @@ chmod 0644 "$BP"
 chcon u:object_r:vendor_file:s0 "$BP" 2>/dev/null || true
 
 # ------------------------------------------------------------------------------
-# 4. Verify installation
+# 4. Verify
 # ------------------------------------------------------------------------------
 
 log "Verifying installed files"
@@ -295,36 +282,38 @@ log "Verifying installed files"
 [ -s "$XML_DST" ] || die "XML installation failed"
 [ -s "$SO_DST" ] || die "SO installation failed"
 
+log "Installed file checksums"
+
 md5sum "$XML_DST" "$SO_DST"
 
-log "Verifying SKU policy"
+log "SKU audio policy"
 
 grep -n 'bluetooth.*audio_policy_configuration' "$SKU"
 
-log "Verifying A2DP properties"
+log "A2DP properties"
 
 grep -n 'a2dp_offload' "$BP"
 
-log "Bluetooth A2DP fix installed successfully"
+log "Installation completed"
 
 DEVICE_SCRIPT_EOF
 
 # ==============================================================================
-# 6. Push and execute installer
+# 6. Execute installer
 # ==============================================================================
 
-say "Uploading device installer"
+say "Uploading installer"
 
 adb push "$WORK/device_install.sh" \
     /data/local/tmp/warm_bt_fix.sh >/dev/null
 
-say "Installing Bluetooth A2DP fix"
+say "Installing Bluetooth fix"
 
 adb shell sh /data/local/tmp/warm_bt_fix.sh ||
     die "Device installation failed"
 
 # ==============================================================================
-# 7. Restart audio services
+# 7. Restart audio server
 # ==============================================================================
 
 say "Restarting audioserver"
@@ -346,22 +335,21 @@ fi
 cat <<'EOF'
 
 ============================================================
-       WARM BLUETOOTH A2DP FIX INSTALLED
+          WARM BLUETOOTH A2DP FIX INSTALLED
 ============================================================
 
-Installation completed successfully.
+Installation completed.
 
-A reboot is required for the new properties to load.
-
-Run:
+Reboot your device:
 
     adb reboot
 
-After reboot, connect your Bluetooth headset and play music.
+After reboot, connect your Bluetooth headset.
 
 Verify:
 
     adb shell dumpsys bluetooth_manager | grep -E 'mA2dpOffloadEnabled|mCodecConfig'
 
 ============================================================
+
 EOF
